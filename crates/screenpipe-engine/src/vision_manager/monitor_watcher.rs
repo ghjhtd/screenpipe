@@ -147,6 +147,14 @@ fn vision_capture_silent(
     went_silent || never_produced
 }
 
+/// The stall watchdog is only meaningful while the OS expects vision capture
+/// to make progress. A locked screen intentionally pauses capture and freezes
+/// both heartbeats, so treating that state as a silent wedge causes a pointless
+/// restart every cooldown window.
+fn should_run_vision_stall_watchdog(screen_locked: bool) -> bool {
+    !screen_locked
+}
+
 /// Start the monitor watcher that polls for monitor changes.
 /// When `audio_manager` is provided, SCK-based (output) audio devices are also
 /// stopped/restarted alongside vision during DRM pause/resume.
@@ -443,7 +451,7 @@ pub async fn start_monitor_watcher(
             //     `vision_capture_silent`.
             // Both are cooldown-gated so a stall a restart can't fix can't cause
             // a restart storm, and neither fires on a healthy static screen.
-            {
+            if should_run_vision_stall_watchdog(crate::sleep_monitor::screen_is_locked()) {
                 let now_ts = now_epoch_secs();
                 let snap = vision_manager.vision_metrics().snapshot();
                 let wedged = vision_capture_wedged(
@@ -821,6 +829,12 @@ mod tests {
         // same config won't help (permission/monitor issue handled elsewhere) and
         // could restart-loop → not silent.
         assert!(!vision_capture_silent(600.0, 0, 0, NOW));
+    }
+
+    #[test]
+    fn stall_watchdog_is_suppressed_while_screen_is_locked() {
+        assert!(!should_run_vision_stall_watchdog(true));
+        assert!(should_run_vision_stall_watchdog(false));
     }
 
     fn mon(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorData {
