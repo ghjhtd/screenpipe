@@ -505,8 +505,15 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                          WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+               AND (
+                 id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                        WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+                 OR (
+                   id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                              WHERE audio_chunk_id IS NOT NULL)
+                   AND timestamp BETWEEN ?1 AND ?2
+                 )
+               )
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                               WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )
@@ -556,8 +563,15 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                          WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+               AND (
+                 id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                        WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+                 OR (
+                   id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                              WHERE audio_chunk_id IS NOT NULL)
+                   AND timestamp BETWEEN ?1 AND ?2
+                 )
+               )
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                               WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )
@@ -788,8 +802,15 @@ impl DatabaseManager {
                WHERE evicted_at IS NULL
                AND file_path != ''
                AND file_path NOT LIKE 'cloud://%'
-               AND id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
-                          WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+               AND (
+                 id IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                        WHERE timestamp BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)
+                 OR (
+                   id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
+                              WHERE audio_chunk_id IS NOT NULL)
+                   AND timestamp BETWEEN ?1 AND ?2
+                 )
+               )
                AND id NOT IN (SELECT DISTINCT audio_chunk_id FROM audio_transcriptions
                               WHERE timestamp NOT BETWEEN ?1 AND ?2 AND audio_chunk_id IS NOT NULL)"#,
         )

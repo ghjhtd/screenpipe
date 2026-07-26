@@ -26,3 +26,16 @@ swiftc -O scripts/macos-local-service/ScreenpipeLocalService.swift \
 ```
 
 部署时应保持 `CFBundleIdentifier` 和签名证书稳定，避免 macOS TCC 将重新构建后的程序识别成新的权限主体。
+
+## NAS 完整归档
+
+[`screenpipe-nas-archive`](./screenpipe-nas-archive) 不只同步媒体文件，还会：
+
+- 用 SQLite online backup API 生成可恢复的一致性 `db.sqlite`；
+- 维护不会随本机清理而丢失路径的 `archive-catalog.sqlite`；
+- 在 NAS 的 Btrfs 上保留 latest/previous 两代数据库快照；
+- 仅在三类数据都成功落盘后写入 `archive_complete_through` 回执。
+
+将该回执通过 `--retention-archive-receipt` 交给录制引擎后，本机清理只会处理回执已经覆盖的时间范围。NAS 离线或数据库备份失败时，清理会自动停住，不会为了满足保留天数而牺牲尚未归档的数据。
+
+媒体和映射目录默认每 15 分钟增量同步；累计数据库每 6 小时生成一次一致性快照，避免每轮都写入数 GB 临时文件而消耗本机 SSD。回执时间取三类归档中最慢的一项，因此这一优化不会放宽本机清理的安全边界。

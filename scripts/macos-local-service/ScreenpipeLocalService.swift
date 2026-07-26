@@ -30,8 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         "--pause-extraction-on-input-ms", "300",
         "--visual-check-interval-ms", "5000",
         "--disable-telemetry",
-        "--retention-days", "3",
-        "--retention-mode", "media"
+        "--retention-days", "7",
+        "--retention-mode", "media",
+        "--retention-archive-receipt", NSHomeDirectory() + "/.screenpipe/monitor/nas-archive.json"
     ]
 
     private var lockFileDescriptor: Int32 = -1

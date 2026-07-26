@@ -757,6 +757,12 @@ pub struct RecordArgs {
     #[arg(long, value_enum, default_value_t = crate::retention::RetentionMode::Media)]
     pub retention_mode: crate::retention::RetentionMode,
 
+    /// Require a durable archive receipt before local retention may evict media.
+    /// The JSON receipt must report state="healthy" and an
+    /// archive_complete_through timestamp covering the retention cutoff.
+    #[arg(long)]
+    pub retention_archive_receipt: Option<PathBuf>,
+
     /// Skip the background JPEG->MP4 snapshot compaction worker.
     /// Use when the MP4 timeline UI is not used, e.g. task-mining tools
     /// that consume accessibility_text / ui_events only.
@@ -2663,6 +2669,20 @@ mod tests {
         assert!(args.api_auth);
         assert!(args.use_all_monitors);
         assert!(args.use_system_default_audio);
+    }
+
+    #[test]
+    fn test_retention_archive_receipt_path_parses() {
+        let args = record_args([
+            "screenpipe",
+            "record",
+            "--retention-archive-receipt",
+            "/tmp/screenpipe-archive.json",
+        ]);
+        assert_eq!(
+            args.retention_archive_receipt,
+            Some(PathBuf::from("/tmp/screenpipe-archive.json"))
+        );
     }
 
     #[test]

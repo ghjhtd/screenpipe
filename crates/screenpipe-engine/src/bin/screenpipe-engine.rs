@@ -1863,6 +1863,7 @@ async fn main() -> anyhow::Result<()> {
         let api_auth_key = config.api_auth_key.clone();
         let retention_days = record_args.retention_days;
         let retention_mode = record_args.retention_mode;
+        let retention_archive_receipt = record_args.retention_archive_receipt.clone();
         let retention_enabled = retention_days > 0;
         tokio::spawn(async move {
             if !retention_enabled {
@@ -1877,6 +1878,7 @@ async fn main() -> anyhow::Result<()> {
                     "enabled": true,
                     "retention_days": retention_days,
                     "mode": retention_mode,
+                    "archive_receipt_path": retention_archive_receipt,
                 })),
                 api_auth_key.as_deref(),
             );

@@ -15,7 +15,7 @@ pub async fn handle_backup_command(
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(paths::default_screenpipe_data_dir);
-    let db_path = base_dir.join("data").join("db.sqlite");
+    let db_path = base_dir.join("db.sqlite");
 
     if !db_path.exists() {
         anyhow::bail!("database not found at {}", db_path.display());

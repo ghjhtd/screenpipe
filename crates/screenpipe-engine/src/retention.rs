@@ -16,7 +16,7 @@ use oasgen::{oasgen, OaSchema};
 use screenpipe_db::DatabaseManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -80,6 +80,8 @@ pub struct RetentionConfig {
     pub retention_days: u32,
     #[serde(default)]
     pub mode: RetentionMode,
+    #[serde(default)]
+    pub archive_receipt_path: Option<String>,
 }
 
 impl Default for RetentionConfig {
@@ -88,6 +90,7 @@ impl Default for RetentionConfig {
             enabled: false,
             retention_days: 14,
             mode: RetentionMode::Media,
+            archive_receipt_path: None,
         }
     }
 }
@@ -102,6 +105,8 @@ pub struct RetentionConfigureRequest {
     pub retention_days: Option<u32>,
     /// "media" (default) or "all". Omit to leave unchanged.
     pub mode: Option<RetentionMode>,
+    /// Optional archive receipt required before local media can be evicted.
+    pub archive_receipt_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, OaSchema)]
@@ -112,6 +117,48 @@ pub struct RetentionStatusResponse {
     pub last_cleanup: Option<String>,
     pub last_error: Option<String>,
     pub total_deleted: u64,
+    pub archive_receipt_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArchiveReceipt {
+    state: String,
+    archive_complete_through: String,
+}
+
+async fn archive_receipt_covers(path: &Path, cutoff: DateTime<Utc>) -> Result<(), String> {
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let receipt: ArchiveReceipt = serde_json::from_str(&contents)
+        .map_err(|error| format!("invalid JSON in {}: {error}", path.display()))?;
+
+    if receipt.state != "healthy" {
+        return Err(format!(
+            "{} reports state={}",
+            path.display(),
+            receipt.state
+        ));
+    }
+
+    let complete_through = DateTime::parse_from_rfc3339(&receipt.archive_complete_through)
+        .map_err(|error| {
+            format!(
+                "invalid archive_complete_through in {}: {error}",
+                path.display()
+            )
+        })?
+        .with_timezone(&Utc);
+
+    if complete_through < cutoff {
+        return Err(format!(
+            "archive complete through {}, but cleanup cutoff is {}",
+            complete_through.to_rfc3339(),
+            cutoff.to_rfc3339()
+        ));
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -162,6 +209,9 @@ pub async fn retention_configure(
             if let Some(mode) = request.mode {
                 runtime.config.mode = mode;
             }
+            if let Some(path) = request.archive_receipt_path {
+                runtime.config.archive_receipt_path = Some(path);
+            }
 
             if !wants_enabled && runtime.config.enabled {
                 // Disable: abort background task
@@ -190,6 +240,7 @@ pub async fn retention_configure(
                 "enabled": runtime.config.enabled,
                 "retention_days": runtime.config.retention_days,
                 "mode": runtime.config.mode,
+                "archive_receipt_path": runtime.config.archive_receipt_path,
             })))
         }
         None => {
@@ -199,6 +250,7 @@ pub async fn retention_configure(
                     "enabled": false,
                     "retention_days": retention_days,
                     "mode": request.mode.unwrap_or_default(),
+                    "archive_receipt_path": request.archive_receipt_path,
                 })));
             }
 
@@ -207,6 +259,7 @@ pub async fn retention_configure(
                 enabled: true,
                 retention_days,
                 mode: request.mode.unwrap_or_default(),
+                archive_receipt_path: request.archive_receipt_path,
             };
 
             let run_now = Arc::new(tokio::sync::Notify::new());
@@ -236,6 +289,7 @@ pub async fn retention_configure(
                 "enabled": true,
                 "retention_days": retention_days,
                 "mode": request.mode.unwrap_or_default(),
+                "archive_receipt_path": config.archive_receipt_path,
             })))
         }
     }
@@ -256,6 +310,7 @@ pub async fn retention_status(
             last_cleanup: None,
             last_error: None,
             total_deleted: 0,
+            archive_receipt_path: None,
         })),
         Some(runtime) => Ok(JsonResponse(RetentionStatusResponse {
             enabled: runtime.config.enabled,
@@ -264,6 +319,7 @@ pub async fn retention_status(
             last_cleanup: runtime.last_cleanup.map(|t| t.to_rfc3339()),
             last_error: runtime.last_error.clone(),
             total_deleted: runtime.total_deleted,
+            archive_receipt_path: runtime.config.archive_receipt_path.clone(),
         })),
     }
 }
@@ -331,10 +387,14 @@ fn spawn_retention_loop(
                 }
             }
 
-            let (retention_days, mode) = {
+            let (retention_days, mode, archive_receipt_path) = {
                 let guard = state.read().await;
                 match guard.as_ref() {
-                    Some(rt) if rt.config.enabled => (rt.config.retention_days, rt.config.mode),
+                    Some(rt) if rt.config.enabled => (
+                        rt.config.retention_days,
+                        rt.config.mode,
+                        rt.config.archive_receipt_path.clone(),
+                    ),
                     _ => continue,
                 }
             };
@@ -349,6 +409,20 @@ fn spawn_retention_loop(
                     continue;
                 }
             };
+
+            if let Some(path) = archive_receipt_path.as_deref() {
+                if let Err(error) = archive_receipt_covers(Path::new(path), cutoff).await {
+                    warn!(
+                        "retention: archive receipt does not cover cleanup cutoff; skipping: {}",
+                        error
+                    );
+                    let mut guard = state.write().await;
+                    if let Some(rt) = guard.as_mut() {
+                        rt.last_error = Some(format!("archive guard: {error}"));
+                    }
+                    continue;
+                }
+            }
 
             if watermark_mode != Some(mode) {
                 watermark = None;
@@ -674,6 +748,55 @@ mod tests {
         // `now - Duration::days(..)` panicked here; the guard must yield None so
         // the retention loop skips the cycle instead of crashing.
         assert_eq!(retention_cutoff(u32::MAX, now), None);
+    }
+
+    #[tokio::test]
+    async fn archive_receipt_must_cover_cleanup_cutoff() {
+        let path = std::env::temp_dir().join(format!(
+            "screenpipe-archive-receipt-{}.json",
+            std::process::id()
+        ));
+        let now = Utc::now();
+        tokio::fs::write(
+            &path,
+            serde_json::json!({
+                "state": "healthy",
+                "archive_complete_through": now.to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(archive_receipt_covers(&path, now - Duration::days(7))
+            .await
+            .is_ok());
+        assert!(archive_receipt_covers(&path, now + Duration::seconds(1))
+            .await
+            .is_err());
+
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn media_retention_evicts_untranscribed_audio_by_chunk_timestamp() {
+        let db = DatabaseManager::new("sqlite::memory:", Default::default())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let chunk_timestamp = (now - Duration::hours(1)).to_rfc3339();
+        db.execute_raw_sql(&format!(
+            "INSERT INTO audio_chunks (file_path, timestamp) VALUES ('/tmp/untranscribed.mp4', '{}')",
+            chunk_timestamp
+        ))
+        .await
+        .unwrap();
+
+        let result = db
+            .evict_media_in_range(now - Duration::hours(2), now)
+            .await
+            .unwrap();
+        assert_eq!(result.audio_chunks_evicted, 1);
     }
 
     /// Regression test for screenpipe/screenpipe#4843: the retention loop used
