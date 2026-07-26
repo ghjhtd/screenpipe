@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: screenpipe-archive-console:${SCREENPIPE_CONSOLE_IMAGE_TAG:-local}
+    image: screenpipe-archive-console:destiny
     container_name: screenpipe-archive-console
     restart: unless-stopped
     read_only: true
