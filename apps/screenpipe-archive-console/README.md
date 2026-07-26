@@ -24,6 +24,7 @@ SCREENPIPE_ARCHIVE_API_KEY_FILE=/path/to/api-key bun run serve
 - 服务地址：`http://100.64.0.7:3035`
 - 上游归档：`http://100.64.0.1:3030`
 - 密钥文件：`/opt/screenpipe-archive-console/shared/api-key`
+- Node 运行时：`/opt/screenpipe-archive-console/runtime/node`（从 Destiny 已验证的 Node 22 固化，避免依赖用户 Home 下的 nvm 路径）
 - 网络边界：只发布到 Destiny 的 Tailscale 地址，不绑定公网网卡
 - 运行方式：主路径为 `screenpipe-archive-console.service`；`compose.destiny.yaml` 保留为容器化备选
 

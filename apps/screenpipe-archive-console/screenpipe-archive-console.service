@@ -17,7 +17,7 @@ Environment=CONSOLE_HOST=100.64.0.7
 Environment=CONSOLE_PORT=3035
 Environment=SCREENPIPE_UPSTREAM=http://100.64.0.1:3030
 Environment=SCREENPIPE_ARCHIVE_API_KEY_FILE=/opt/screenpipe-archive-console/shared/api-key
-ExecStart=/usr/local/bin/node /opt/screenpipe-archive-console/current/server/index.mjs
+ExecStart=/opt/screenpipe-archive-console/runtime/node /opt/screenpipe-archive-console/current/server/index.mjs
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
