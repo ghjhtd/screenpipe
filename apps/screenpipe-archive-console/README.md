@@ -25,6 +25,6 @@ SCREENPIPE_ARCHIVE_API_KEY_FILE=/path/to/api-key bun run serve
 - 上游归档：`http://100.64.0.1:3030`
 - 密钥文件：`/opt/screenpipe-archive-console/shared/api-key`
 - 网络边界：只发布到 Destiny 的 Tailscale 地址，不绑定公网网卡
-- 运行方式：`compose.destiny.yaml`
+- 运行方式：主路径为 `screenpipe-archive-console.service`；`compose.destiny.yaml` 保留为容器化备选
 
-构建前必须先运行 `bun run build && bun test`。部署时将本目录同步到一个不可变 release 目录，再令 `/opt/screenpipe-archive-console/current` 指向该 release，并从 current 执行 Compose。
+构建前必须先运行 `bun run build && bun test`。部署时将本目录同步到一个不可变 release 目录，只安装生产依赖，再令 `/opt/screenpipe-archive-console/current` 指向该 release 并重启 systemd 服务。若 Docker Hub 可用，也可以从 current 执行 Compose；两种方式使用相同的只读前端构建、BFF 和服务端密钥文件。
