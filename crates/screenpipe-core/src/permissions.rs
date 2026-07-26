@@ -106,9 +106,11 @@ pub fn preflight_check(need_screen: bool, need_audio: bool) -> bool {
         eprintln!();
         eprintln!("run \"screenpipe\" again after granting permissions.");
 
-        // try to open System Settings on macOS
+        // Interactive CLI sessions may guide the user to System Settings. Managed
+        // background services must stay headless: repeatedly opening Settings from
+        // an automatic restart loop looks like a macOS permission failure.
         #[cfg(target_os = "macos")]
-        {
+        if std::env::var_os("SCREENPIPE_MANAGED_MODE").is_none() {
             let pane = if need_screen && !perms.screen_recording.is_granted() {
                 "Privacy_ScreenCapture"
             } else {
@@ -134,9 +136,8 @@ pub fn preflight_check(need_screen: bool, need_audio: bool) -> bool {
 ///   result is always reliable; a `false` can be a false negative (known bug for CLI
 ///   binaries on fresh TCC cache paths, e.g. via `npx`).
 /// - `capture_probe`: `CGWindowListCreateImage` — real capture attempt. Reliable on
-///   macOS ≤ 14 and in CLI. On macOS 15+ inside a Tauri app, Apple changed it to
-///   return the calling app's own windows even without permission → always non-NULL →
-///   false positive. Do NOT use in Tauri on macOS 15+ release builds.
+///   macOS ≤ 14. On macOS 15+, Apple changed its behaviour and legacy capture probes
+///   can also cause additional privacy reminders. Do not use it on macOS 15+.
 ///
 /// See `check_screen_recording` and `check_screen_recording_tauri` for how these
 /// are combined per context.
@@ -213,10 +214,16 @@ mod macos_screen_recording {
     }
 }
 
-/// CLI: always uses `preflight() || capture_probe()` on every macOS version.
+/// CLI: avoid the legacy capture probe on macOS 15+ because it can produce both
+/// misleading answers and additional privacy reminders.
 #[cfg(target_os = "macos")]
 pub fn check_screen_recording() -> PermissionStatus {
-    if macos_screen_recording::preflight() || macos_screen_recording::capture_probe() {
+    let ok = if macos_screen_recording::is_sequoia_or_later() {
+        macos_screen_recording::preflight()
+    } else {
+        macos_screen_recording::preflight() || macos_screen_recording::capture_probe()
+    };
+    if ok {
         PermissionStatus::Granted
     } else {
         PermissionStatus::Denied
@@ -323,13 +330,17 @@ pub fn check_accessibility() -> PermissionStatus {
 mod tests {
     use super::*;
 
-    /// Either probe returning true means permission is granted.
+    /// A supported probe returning true means permission is granted.
     #[test]
     fn probe_implies_granted() {
-        if macos_screen_recording::preflight() || macos_screen_recording::capture_probe() {
+        let probe_granted = macos_screen_recording::preflight()
+            || (!macos_screen_recording::is_sequoia_or_later()
+                && macos_screen_recording::capture_probe());
+        if probe_granted {
             assert_eq!(check_screen_recording(), PermissionStatus::Granted);
-            // tests run with debug_assertions → check_screen_recording_tauri uses full probe chain
-            assert_eq!(check_screen_recording_tauri(), PermissionStatus::Granted);
+            if !macos_screen_recording::is_sequoia_or_later() {
+                assert_eq!(check_screen_recording_tauri(), PermissionStatus::Granted);
+            }
         }
     }
 
@@ -340,7 +351,9 @@ mod tests {
     fn probes_are_stable_under_repetition() {
         for _ in 0..256 {
             let _ = macos_screen_recording::preflight();
-            let _ = macos_screen_recording::capture_probe();
+            if !macos_screen_recording::is_sequoia_or_later() {
+                let _ = macos_screen_recording::capture_probe();
+            }
         }
     }
 }

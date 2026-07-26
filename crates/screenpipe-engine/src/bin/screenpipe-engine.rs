@@ -775,7 +775,8 @@ async fn main() -> anyhow::Result<()> {
         debug!("audio disabled; skipping ffmpeg preflight");
     }
 
-    // Pre-flight permission check (macOS: trigger native prompts + poll until granted)
+    // Pre-flight permission check. Interactive CLI sessions may trigger native
+    // prompts; managed background services only check and report permission state.
     {
         use screenpipe_core::permissions;
 
@@ -789,34 +790,44 @@ async fn main() -> anyhow::Result<()> {
         {
             use cidre::av;
 
-            // Trigger native prompts for undetermined permissions
-            if need_screen {
-                #[link(name = "CoreGraphics", kind = "framework")]
-                extern "C" {
-                    fn CGRequestScreenCaptureAccess() -> bool;
-                }
-                unsafe {
-                    CGRequestScreenCaptureAccess();
-                }
-            }
-            if need_audio {
-                if let Ok(status) =
-                    av::CaptureDevice::authorization_status_for_media_type(av::MediaType::audio())
-                {
-                    if status == av::AuthorizationStatus::NotDetermined {
-                        // Fire-and-forget: triggers the native "Allow microphone" dialog
-                        let mut block = cidre::blocks::SendBlock::new1(|_granted: bool| {});
-                        let _ = av::CaptureDevice::request_access_for_media_type_ch(
-                            av::MediaType::audio(),
-                            &mut block,
-                        );
+            let managed_mode = std::env::var_os("SCREENPIPE_MANAGED_MODE").is_some();
+
+            // Only an explicit interactive launch may ask for permission. An
+            // always-on service can restart after sleep or a health failure; asking
+            // on every restart traps the user in repeated macOS permission dialogs.
+            if !managed_mode {
+                if need_screen {
+                    #[link(name = "CoreGraphics", kind = "framework")]
+                    extern "C" {
+                        fn CGRequestScreenCaptureAccess() -> bool;
+                    }
+                    unsafe {
+                        CGRequestScreenCaptureAccess();
                     }
                 }
+                if need_audio {
+                    if let Ok(status) = av::CaptureDevice::authorization_status_for_media_type(
+                        av::MediaType::audio(),
+                    ) {
+                        if status == av::AuthorizationStatus::NotDetermined {
+                            // Fire-and-forget: triggers the native "Allow microphone" dialog
+                            let mut block = cidre::blocks::SendBlock::new1(|_granted: bool| {});
+                            let _ = av::CaptureDevice::request_access_for_media_type_ch(
+                                av::MediaType::audio(),
+                                &mut block,
+                            );
+                        }
+                    }
+                }
+            } else {
+                eprintln!("  managed mode: native permission prompts disabled");
             }
 
-            // Poll until required permissions are granted (timeout 120s)
+            // Interactive sessions wait long enough for a person to visit Settings.
+            // Managed services only cover the brief TCC warm-up window, then exit
+            // with EX_NOPERM so their supervisor can stop retrying.
             let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(120);
+            let timeout = std::time::Duration::from_secs(if managed_mode { 15 } else { 120 });
             let mut printed_waiting = false;
 
             loop {
@@ -842,7 +853,9 @@ async fn main() -> anyhow::Result<()> {
                 if start.elapsed() > timeout {
                     eprintln!("timed out waiting for permissions.");
                     if !permissions::preflight_check(need_screen, need_audio) {
-                        std::process::exit(1);
+                        // EX_NOPERM lets the supervising app stop its automatic
+                        // restart loop and wait for an explicit user retry.
+                        std::process::exit(if managed_mode { 77 } else { 1 });
                     }
                     break;
                 }

@@ -1,0 +1,24 @@
+{
+  "arguments": [
+    "record",
+    "--language",
+    "chinese",
+    "--use-system-default-audio",
+    "true",
+    "--audio-transcription-engine",
+    "disabled",
+    "--filter-music",
+    "--prioritize-input-latency",
+    "--extraction-thread-priority",
+    "lowest",
+    "--pause-extraction-on-input-ms",
+    "300",
+    "--visual-check-interval-ms",
+    "5000",
+    "--disable-telemetry",
+    "--retention-days",
+    "3",
+    "--retention-mode",
+    "media"
+  ]
+}
