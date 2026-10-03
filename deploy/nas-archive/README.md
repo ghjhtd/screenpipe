@@ -7,7 +7,7 @@
 这套部署把 Mac 定位为可替换的实时采集节点，把 Jing-Nas 定位为长期数据节点：
 
 - 原始媒体只追加归档到 NAS，不因 Mac 的七天本地保留而删除。
-- 每次收到新的 SQLite 一致性快照，NAS 都建立只读 Btrfs generation；每月再建立一个只读月锚点。
+- 2026-10-03 起仅接收新增记录、后续修改和新媒体；一次性历史基线加永久增量支持恢复。停止周期整库上传、generation 和月锚点新建；既有历史原件暂不删除。
 - 原生 Screenpipe Linux 引擎以“只服务、不采集”模式读取恢复后的 SQLite，因此历史 `/search`、帧、音频、说话人、会议、标签、memories、pipes 等接口沿用同版本 Screenpipe 的路由和响应结构。
 - PostgreSQL 只保存可重建的跨月检索索引。它按月分区，并同时提供 `tsvector`、中文友好的 trigram 子串索引；它绝不是原始真源。
 - `100.64.0.1:3030` 只绑定 NAS 的 Tailscale 地址。所有数据接口需要 Bearer Token；没有新增公网入口。
@@ -19,16 +19,18 @@
 /vol1/1000/jing/screenpipe-archive/jing-2/
 ├── data/YYYY-MM-DD/*.mp4 / *.jpg         # 原始媒体，追加写
 ├── _metadata/
-│   ├── database/db.sqlite.latest         # Mac 发布的最新一致性快照
+│   ├── database/db.sqlite.latest         # 既有一次性历史基线，不周期替换
 │   ├── catalog/archive-catalog.sqlite.latest
 │   └── runtime/                          # pipes、设置存储、pi-agent lockfile
 ├── _immutable/
-│   ├── generations/YYYY/MM/DD/<UTC>/     # 每个六小时 DB generation，只读 Btrfs subvolume
-│   └── monthly/YYYY/MM/                   # 每月首个 generation 的只读月锚点
+│   ├── generations/YYYY/MM/DD/<UTC>/     # 既有只读历史，停止周期新建
+│   └── monthly/YYYY/MM/                   # 既有月锚点，停止周期新建
 └── _service/
     ├── screenpipe/db.sqlite              # 原生 API 使用的可重建 serving DB
+    ├── memory-live/db.sqlite             # 永久原始增量与媒体确认，必须保护
     ├── postgres/                          # 可重建 PostgreSQL 索引
     └── state/
+        ├── archive-policy.json            # archive_mode=incremental，持久禁止全量覆盖
         ├── generation.json                # 当前 generation 与恢复统计
         └── shards.json                    # 由只读分片重建的可读目录
 ```
@@ -51,12 +53,16 @@ Screenpipe 不能让 NAS 的 Linux 容器直接读取 Mac 的屏幕和麦克风�
 
 - NAS 网关使用通配路由暴露当前原生 Screenpipe `0.4.26` 的全部接口；`/openapi.json` 当前列出 89 个正式路径，WebSocket、pipes、connections、MCP server 等未进入 OpenAPI 的路由也原样代理。
 - 历史 GET（搜索、帧/缩略图、音频样本、说话人、会议、memories、artifacts、elements、标签等）由 NAS 上的同版本原生引擎读取长期 serving DB。
-- 实时设备、健康、录制控制、WebSocket、pipes/connections/MCP 控制面，以及一般写请求由网关转发给 Mac。这样只有 Mac 一个写入者，下一次一致性快照不会覆盖另一套并发写入。
+- 实时设备、健康、录制控制、WebSocket、pipes/connections/MCP 控制面，以及一般写请求由网关转发给 Mac。这样只有 Mac 一个写入者，NAS 增量只接收源记录，不形成另一套业务写入。
 - 所有非健康接口都要求 `Authorization: Bearer <token>`。外部 Token 和 Mac 内部 Token 分开保存于 `/opt/screenpipe-archive/.env`；该文件权限为 `0640`，不进入 Git。
 - 浏览器预检策略与原生服务一致，只允许 `localhost`、`127.0.0.1` 和 Tauri 本地来源；任意外部网页来源会被拒绝，不能借用户的 Tailnet 身份跨站读取历史。
 - Mac 在线时，同一个 `http://100.64.0.1:3030` 入口覆盖历史与实时 API。Mac 离线时不是“所有功能完全一致”：历史读取仍可用，屏幕/麦克风采集、实时控制和写操作不可用并返回 503。这是采集硬件与单写者边界，不能由 NAS 数据库伪造。
 
-当前归档恢复点目标（RPO）是：媒体与媒体映射目录不超过 15 分钟，SQLite 事务一致性快照不超过 6 小时。因此这是一套长期完整归档机制，但不是零数据丢失的同步复制；若要求 Mac 突然损坏时也不丢最后数分钟数据库事务，下一步需要增加持续 SQLite WAL 复制及异机备份。
+当前目标为正常在线记录 10–20 分钟可查：源新增走 ID 尾部，后续修改走数据库持久日志；NAS 事务提交后确认，旧批次不能覆盖新内容。18 张原始表包含 elements、说话人、会议与标签关系；NAS 永久增量不因基线覆盖而清退。媒体/catalog 约 15 分钟补传，文件落盘与记录确认独立。关机、断网、大媒体和积压可能延长，以实际回执为准。
+
+维护任务每轮最多 25 个 2000 行批次，批间检查 60 秒预算，增量 UPSERT 到原生查询库；不会创建整库副本。`archive-policy.json` 优先于派生 status，即使派生状态丢失也不能退回旧全量刷新。查询库提交后才推进应用水位，失败下轮可重放。旧字段更名、主键改变和源库重建仍需适配验证。
+
+恢复材料为历史基线、永久增量、catalog、原始媒体及旧代专有历史。PostgreSQL 和原生查询库可重建；旧 ID 迟到修改的 PostgreSQL 派生搜索尚需单独补齐索引，不能用索引替代原始增量。
 
 首次安装或 Mac 本地 Screenpipe Token 发生变化后，在 Mac 运行 `scripts/macos-local-service/screenpipe-nas-api-provision`。它通过标准输入把本机 Token 送入 NAS 的 root helper，不在命令参数、日志或终端中显示明文，然后重启网关并验证反向隧道。
 
@@ -81,6 +87,6 @@ systemctl status screenpipe-archive-maintenance.service
 sudo bash -c 'set -a; . /opt/screenpipe-archive/.env; curl -fsS -H "Authorization: Bearer ${SCREENPIPE_ARCHIVE_API_KEY}" http://100.64.0.1:3030/archive/v1/health'
 ```
 
-PostgreSQL 使用 NAS 自带的 PostgreSQL 15 二进制，但采用独立 Unix 用户、独立 data directory、独立 Unix Socket 和独立 `127.0.0.1:15432`，不会连接或修改 fnOS 自用的 5432。索引丢失时可以从不可变 SQLite generation 重建；恢复所需原件是 `_immutable/`、`_metadata/` 与原始媒体，不能反过来只备份 PostgreSQL。
+PostgreSQL 使用 NAS 自带的 PostgreSQL 15 二进制，但采用独立 Unix 用户、独立 data directory、独立 Unix Socket 和独立 `127.0.0.1:15432`，不会连接或修改 fnOS 自用的 5432。索引丢失时可以从不可变 SQLite generation 重建；恢复所需原件是 `_immutable/`、`_metadata/`、`_service/memory-live/` 与原始媒体，不能反过来只备份 PostgreSQL。
 
-NAS 仍然是单一物理故障域。要保存数年或数十年，至少还应把 `_immutable/`、`_metadata/`、`data/` 和部署清单做一份异机或异地加密备份；只依赖这一台 NAS 不能称为“100% 永久”。
+NAS 仍然是单一物理故障域。要保存数年或数十年，A/B 按既有 OPC 日程备份 NAS，覆盖 `_immutable/`、`_metadata/`、`_service/memory-live/`、`data/` 和部署清单；本轮不改变日程或执行大基线。异地能力仍需单独验收；只依赖这一台 NAS 不能称为“100% 永久”。

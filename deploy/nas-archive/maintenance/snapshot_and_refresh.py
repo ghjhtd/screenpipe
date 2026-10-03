@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -212,6 +213,46 @@ def main() -> int:
     args = parser.parse_args()
 
     archive_root = args.archive_root.resolve()
+    mode = None
+    # A durable policy prevents status loss or a manual refresh from restoring
+    # the obsolete full-copy path over records already received incrementally.
+    for policy in (
+        archive_root / "_service" / "state" / "archive-policy.json",
+        archive_root / "_service" / "memory-live" / "status.json",
+    ):
+        if policy.is_file():
+            with policy.open(encoding="utf-8") as handle:
+                mode = json.load(handle).get("archive_mode")
+            if mode is not None:
+                break
+    if mode == "incremental":
+        store = None
+        if os.geteuid() != 0:
+            sys.path.insert(0, "/opt/screenpipe-archive/python")
+            from memory_incremental import Store
+
+            store = Store(archive_root / "_service" / "screenpipe" / "db.sqlite", archive_root)
+        started = time.monotonic()
+        total = 0
+        # Drain bounded chunks so large elements batches cannot starve the native
+        # projection behind a single 2000-row / five-minute maintenance cycle.
+        for _ in range(25):
+            if store is None:
+                result = subprocess.run([
+                    "sudo", "-n", "-u", "screenpipe-archive",
+                    "/opt/screenpipe-archive/.venv/bin/python",
+                    "/opt/screenpipe-archive/python/memory_incremental.py", "materialize",
+                    "--root", str(archive_root),
+                ], check=True, capture_output=True, text=True, timeout=70)
+                count = json.loads(result.stdout)
+            else:
+                count = store.materialize()
+            total += count
+            if not count or time.monotonic() - started >= 60:
+                break
+        print(json.dumps({"mode": mode, "materialized_rows": total}))
+        refresh_runtime_state(archive_root, archive_root / "_service" / "screenpipe")
+        return 0
     database = archive_root / "_metadata" / "database" / "db.sqlite.latest"
     catalog = archive_root / "_metadata" / "catalog" / "archive-catalog.sqlite.latest"
     state_path = archive_root / "_service" / "state" / "generation.json"

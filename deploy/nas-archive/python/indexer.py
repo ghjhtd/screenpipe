@@ -398,6 +398,9 @@ def main() -> None:
             if marker_path.is_file():
                 with marker_path.open(encoding="utf-8") as handle:
                     generation = json.load(handle)["source_signature"]
+                live = ARCHIVE_ROOT / "_service" / "memory-live" / "status.json"
+                if live.is_file():
+                    generation += ":incremental:" + str(live.stat().st_mtime_ns)
                 if generation != last_generation:
                     indexed = run_once(generation)
                     print(json.dumps({"generation": generation, "indexed": indexed}), flush=True)

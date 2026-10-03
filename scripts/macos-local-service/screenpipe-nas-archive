@@ -8,13 +8,9 @@ set -euo pipefail
 readonly SCREENPIPE_DIR="/Users/a1/.screenpipe"
 readonly SOURCE_DIR="${SCREENPIPE_DIR}/data/"
 readonly DB_PATH="${SCREENPIPE_DIR}/db.sqlite"
-readonly SCREENPIPE_BIN="/Users/a1/.local/share/screenpipe-local-service/bin/screenpipe"
 readonly CATALOG_PATH="${SCREENPIPE_DIR}/archive-catalog.sqlite"
 readonly STATUS_DIR="${SCREENPIPE_DIR}/monitor"
 readonly STATUS_FILE="${STATUS_DIR}/nas-archive.json"
-readonly LOCK_DIR="${STATUS_DIR}/nas-archive.lock"
-readonly DB_SNAPSHOT_MARKER="${STATUS_DIR}/nas-db-snapshot.epoch"
-readonly DB_SNAPSHOT_INTERVAL_SECONDS=21600
 readonly NAS_TARGET="gonghaojing@100.64.0.1"
 readonly NAS_DIR="/vol1/1000/jing/screenpipe-archive/jing-2"
 readonly NAS_METADATA_DIR="${NAS_DIR}/_metadata"
@@ -38,30 +34,34 @@ write_status() {
   "checked_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
   "archive_complete_through": "${complete_through}",
   "target": "Jing-Nas:${NAS_DIR}",
-  "database": "${NAS_METADATA_DIR}/database/db.sqlite.latest",
+  "database": "${NAS_DIR}/_service/memory-live/db.sqlite",
   "catalog": "${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.latest"
 }
 EOF
   mv "${tmp_file}" "${STATUS_FILE}"
+  if [[ "${state}" == "healthy" ]]; then
+    cp "${STATUS_FILE}" "${STATUS_DIR}/nas-archive.last-success.json.tmp"
+    mv "${STATUS_DIR}/nas-archive.last-success.json.tmp" "${STATUS_DIR}/nas-archive.last-success.json"
+  fi
 }
 
-if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+# Kernel lock is released even after SIGKILL or reboot; no stale directory lock.
+zmodload zsh/system
+touch "${STATUS_DIR}/nas-archive.flock"
+if ! zsystem flock -t 1 -f archive_lock_fd "${STATUS_DIR}/nas-archive.flock"; then
   exit 0
 fi
 
 temp_dir="$(mktemp -d "${STATUS_DIR}/nas-archive.XXXXXX")"
 archive_succeeded=false
 previous_complete_through=""
-database_snapshot_due=true
+
 
 if [[ -f "${STATUS_FILE}" ]]; then
   previous_complete_through="$(/usr/bin/jq -r 'select(.state == "healthy") | .archive_complete_through // empty' "${STATUS_FILE}" 2>/dev/null || true)"
 fi
-if [[ -f "${DB_SNAPSHOT_MARKER}" && -n "${previous_complete_through}" ]]; then
-  last_snapshot_epoch="$(<"${DB_SNAPSHOT_MARKER}")"
-  if [[ "${last_snapshot_epoch}" == <-> ]] && (( $(date '+%s') - last_snapshot_epoch < DB_SNAPSHOT_INTERVAL_SECONDS )); then
-    database_snapshot_due=false
-  fi
+if [[ -z "${previous_complete_through}" && -f "${STATUS_DIR}/nas-archive.last-success.json" ]]; then
+  previous_complete_through="$(/usr/bin/jq -r '.archive_complete_through // empty' "${STATUS_DIR}/nas-archive.last-success.json")"
 fi
 
 cleanup() {
@@ -70,7 +70,6 @@ cleanup() {
     find "${temp_dir}" -mindepth 1 -delete
     rmdir "${temp_dir}" 2>/dev/null || true
   fi
-  rmdir "${LOCK_DIR}" 2>/dev/null || true
   if [[ "${archive_succeeded}" != "true" ]]; then
     write_status "error" "完整归档失败，将自动重试；失败期间本机保留策略会停止清理" ""
   fi
@@ -78,13 +77,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-write_status "running" "正在同步媒体、数据库和媒体映射目录" ""
-
 if [[ ! -d "${SOURCE_DIR}" || ! -f "${DB_PATH}" ]]; then
   write_status "idle" "尚无完整的 Screenpipe 数据目录，等待采集服务生成数据" ""
   archive_succeeded=true
   exit 0
 fi
+
+write_status "running" "正在增量归档记录并补传原始媒体" ""
+/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /Users/a1/.local/share/screenpipe-local-service/memory_incremental.py watermark --database "${DB_PATH}" > "${temp_dir}/required.json"
+/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /Users/a1/.local/share/screenpipe-local-service/memory-sync.py
 
 if ! /usr/bin/ssh \
   -o BatchMode=yes \
@@ -133,56 +134,31 @@ CREATE TABLE IF NOT EXISTS frame_snapshots (
 );
 SQL
 
-{
-  print 'BEGIN;'
-  /usr/bin/sqlite3 -readonly "${DB_PATH}" <<SQL
-.timeout 15000
-SELECT 'INSERT OR REPLACE INTO video_media VALUES ('
-       || vc.id || ','
-       || quote(vc.file_path) || ','
-       || quote(replace(vc.file_path, '${SOURCE_DIR}', '')) || ','
-       || quote(vc.device_name) || ','
-       || quote(vc.fps) || ','
-       || quote(min(f.timestamp)) || ','
-       || quote(max(f.timestamp)) || ','
-       || quote('${ARCHIVE_STARTED_AT}') || ');'
-FROM video_chunks vc
-LEFT JOIN frames f ON f.video_chunk_id = vc.id
-WHERE vc.file_path IS NOT NULL AND vc.file_path != ''
-GROUP BY vc.id;
-SELECT 'INSERT OR REPLACE INTO audio_media VALUES ('
-       || id || ','
-       || quote(file_path) || ','
-       || quote(replace(file_path, '${SOURCE_DIR}', '')) || ','
-       || quote(timestamp) || ','
-       || quote('${ARCHIVE_STARTED_AT}') || ');'
-FROM audio_chunks
-WHERE file_path IS NOT NULL AND file_path != '';
-SELECT 'INSERT OR REPLACE INTO frame_snapshots VALUES ('
-       || id || ','
-       || quote(snapshot_path) || ','
-       || quote(replace(snapshot_path, '${SOURCE_DIR}', '')) || ','
-       || quote(timestamp) || ','
-       || quote('${ARCHIVE_STARTED_AT}') || ');'
-FROM frames
-WHERE snapshot_path IS NOT NULL AND snapshot_path != '';
-SQL
-  print "INSERT OR REPLACE INTO metadata VALUES ('source_db', '${DB_PATH}');"
-  print "INSERT OR REPLACE INTO metadata VALUES ('last_cataloged_at', '${ARCHIVE_STARTED_AT}');"
-  print 'COMMIT;'
-} > "${temp_dir}/catalog-update.sql"
+/usr/bin/python3 /Users/a1/.local/share/screenpipe-local-service/catalog-sync.py "${DB_PATH}" "${CATALOG_PATH}" "${SOURCE_DIR}" "${ARCHIVE_STARTED_AT}"
 
-/usr/bin/sqlite3 "${CATALOG_PATH}" < "${temp_dir}/catalog-update.sql"
+write_status "running" "正在补传原始媒体到 NAS" ""
 
 # rsync returns success only after all transferred files have passed its transfer
 # checks. Files remain on the NAS because this archive intentionally has no --delete.
-/usr/bin/rsync \
+media_synced=false
+for archive_attempt in 1 2 3; do
+  if /usr/bin/rsync \
   -a \
   --partial \
   --exclude='.DS_Store' \
   -e '/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=10 -o ServerAliveCountMax=2' \
   "${SOURCE_DIR}" \
-  "${NAS_TARGET}:${NAS_DIR}/"
+  "${NAS_TARGET}:${NAS_DIR}/"; then
+    media_synced=true
+    break
+  fi
+  # Source compaction may replace JPEGs with MP4s between listing and copying.
+  # Retry the complete sync and refresh mappings; never accept a failed copy.
+  write_status "running" "媒体传输未完成，正在刷新映射并重试（${archive_attempt}/3）" ""
+  /usr/bin/python3 /Users/a1/.local/share/screenpipe-local-service/catalog-sync.py "${DB_PATH}" "${CATALOG_PATH}" "${SOURCE_DIR}" "${ARCHIVE_STARTED_AT}"
+  sleep 2
+done
+[[ "${media_synced}" == "true" ]] || exit 1
 
 # Preserve user-visible pipes and the settings store needed to reconstruct the
 # same Screenpipe behavior. Dependency caches and logs are deliberately omitted:
@@ -213,52 +189,29 @@ for agent_file in package.json bun.lock; do
   fi
 done
 
-# SQLite's online backup API produces transactionally consistent snapshots while
-# the capture engine keeps writing to the WAL. A full 1.8GB+ VACUUM INTO every
-# 15 minutes would cause unnecessary SSD writes, so the cumulative DB advances
-# every six hours while media and the compact relationship catalog advance every
-# 15 minutes. The retention receipt remains pinned to the last DB snapshot.
-if [[ "${database_snapshot_due}" == "true" ]]; then
-  "${SCREENPIPE_BIN}" backup --data-dir "${SCREENPIPE_DIR}" export --output "${temp_dir}/db.sqlite"
-fi
+# Evidence is committed by memory-sync.py; only the small catalog is exported here.
 /usr/bin/sqlite3 "${CATALOG_PATH}" ".timeout 15000" ".backup '${temp_dir}/archive-catalog.sqlite'"
 
-# `backup export` opens the destination through Screenpipe's DB layer, which
-# registers sqlite-vec before VACUUM INTO. The stock macOS sqlite3 cannot run
-# quick_check against the speaker_embeddings CHECK constraint (vec_length), so
-# structural verification of the main DB belongs to that command.
+# Verify the small media catalog independently before publication.
 if [[ "$(/usr/bin/sqlite3 "${temp_dir}/archive-catalog.sqlite" 'PRAGMA quick_check;')" != "ok" ]]; then
   exit 1
 fi
 
-# Keep one copy-on-write previous generation on Btrfs, then atomically publish
-# the newly verified latest snapshots. --delay-updates avoids exposing partial DBs.
+write_status "running" "正在发布并验证 NAS 媒体映射目录" ""
+
+# Keep exactly one previous small catalog, then atomically publish the new one.
+# --delay-updates avoids exposing a partially transferred mapping file.
 /usr/bin/ssh \
   -o BatchMode=yes \
   -o ConnectTimeout=8 \
   "${NAS_TARGET}" \
   "if [ -f '${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.latest' ]; then cp --reflink=auto '${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.latest' '${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.previous.tmp' && mv '${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.previous.tmp' '${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.previous'; fi"
 
-if [[ "${database_snapshot_due}" == "true" ]]; then
-  /usr/bin/ssh \
-    -o BatchMode=yes \
-    -o ConnectTimeout=8 \
-    "${NAS_TARGET}" \
-    "if [ -f '${NAS_METADATA_DIR}/database/db.sqlite.latest' ]; then cp --reflink=auto '${NAS_METADATA_DIR}/database/db.sqlite.latest' '${NAS_METADATA_DIR}/database/db.sqlite.previous.tmp' && mv '${NAS_METADATA_DIR}/database/db.sqlite.previous.tmp' '${NAS_METADATA_DIR}/database/db.sqlite.previous'; fi"
-
-  /usr/bin/rsync \
-    -a \
-    --partial \
-    --delay-updates \
-    -e '/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=10 -o ServerAliveCountMax=2' \
-    "${temp_dir}/db.sqlite" \
-    "${NAS_TARGET}:${NAS_METADATA_DIR}/database/db.sqlite.latest"
-fi
-
 /usr/bin/rsync \
   -a \
   --partial \
   --delay-updates \
+  --compress \
   -e '/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=10 -o ServerAliveCountMax=2' \
   "${temp_dir}/archive-catalog.sqlite" \
   "${NAS_TARGET}:${NAS_METADATA_DIR}/catalog/archive-catalog.sqlite.latest"
@@ -270,17 +223,17 @@ if [[ "${local_catalog_size}" != "${remote_catalog_size}" ]]; then
   exit 1
 fi
 
-archive_complete_through="${previous_complete_through}"
-if [[ "${database_snapshot_due}" == "true" ]]; then
-  local_db_size="$(stat -f '%z' "${temp_dir}/db.sqlite")"
-  remote_db_size="$(/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 "${NAS_TARGET}" "stat -c '%s' '${NAS_METADATA_DIR}/database/db.sqlite.latest'")"
-  if [[ "${local_db_size}" != "${remote_db_size}" ]]; then
-    exit 1
-  fi
-  archive_complete_through="${ARCHIVE_STARTED_AT}"
-  print "$(date '+%s')" > "${DB_SNAPSHOT_MARKER}.tmp"
-  mv "${DB_SNAPSHOT_MARKER}.tmp" "${DB_SNAPSHOT_MARKER}"
-fi
-
+# The old complete receipt remains conservative until the incremental receiver
+# confirms a safe coverage boundary before any pending media. No full SQLite upload occurs.
+receipt="$(/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 "${NAS_TARGET}" "sudo -n -u screenpipe-archive /opt/screenpipe-archive/.venv/bin/python /opt/screenpipe-archive/python/memory_incremental.py receipt --root '${NAS_DIR}'")"
 archive_succeeded=true
-write_status "healthy" "媒体和映射目录每 15 分钟归档；SQLite 一致性快照每 6 小时归档" "${archive_complete_through}"
+if archive_complete_through="$(/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /Users/a1/.local/share/screenpipe-local-service/memory_incremental.py verify-receipt --required "${temp_dir}/required.json" --receipt "${receipt}")"; then
+  pending_count="$(/usr/bin/jq -r '.pending_media_count // 0' <<< "${receipt}")"
+  if [[ "${pending_count}" -gt 0 ]]; then
+    write_status "healthy" "已确认到安全归档水位，仍有 ${pending_count} 项媒体待补传；清理不越过缺口" "${archive_complete_through}"
+  else
+    write_status "healthy" "原始记录与修改增量归档；媒体和映射目录每 15 分钟补传，无周期性整库备份" "${archive_complete_through}"
+  fi
+else
+  write_status "media_pending" "媒体或记录仍在补传；保留最近完整归档水位，本机暂不清理" "${previous_complete_through}"
+fi
