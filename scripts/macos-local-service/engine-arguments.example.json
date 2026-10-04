@@ -17,10 +17,11 @@
     "5000",
     "--disable-telemetry",
     "--retention-days",
-    "7",
+    "0",
     "--retention-mode",
     "media",
     "--retention-archive-receipt",
-    "/Users/a1/.screenpipe/monitor/nas-archive.json"
+    "/Users/a1/.screenpipe/monitor/nas-archive.json",
+    "--disable-snapshot-compaction"
   ]
 }

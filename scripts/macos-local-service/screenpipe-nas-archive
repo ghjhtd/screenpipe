@@ -237,3 +237,9 @@ if archive_complete_through="$(/Library/Frameworks/Python.framework/Versions/3.1
 else
   write_status "media_pending" "媒体或记录仍在补传；保留最近完整归档水位，本机暂不清理" "${previous_complete_through}"
 fi
+
+# Local rolling cache: a separate content proof authorizes deletion on the Mac.
+# Failure does not invalidate a successful NAS archive; it retains local data.
+if ! /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /Users/a1/.local/share/screenpipe-local-service/memory-retention.py --apply; then
+  print -u2 '本机七天缓存清理未通过校验，数据继续保留，下轮自动重试。'
+fi

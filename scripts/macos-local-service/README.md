@@ -33,6 +33,8 @@ swiftc -O scripts/macos-local-service/ScreenpipeLocalService.swift \
 
 记录由现有十分钟 LaunchAgent 回传，媒体与小型 catalog 每十五分钟补传。修改日志在 NAS 事务确认后才清退；丢回执安全重放，断网/关机后恢复续传。NAS 不随 Mac 删除原件。
 
-`archive_complete_through` 需验证目标记录水位、修改序号与最旧未完成媒体，不把元数据成功等同于媒体全部完成。录制引擎仍通过 `--retention-archive-receipt` 限制本地清理；无法验证新水位则继续保留最近成功值。
+`archive_complete_through` 需验证目标记录水位、修改序号与最旧未完成媒体，不把元数据成功等同于媒体全部完成。录制引擎使用 `--retention-days 0`，本机七天记录和媒体由素渊 `memory-retention.py` 在归档成功后统一清理：NAS 永久基线和增量逐批内容核验、媒体 SHA-256 一致后才删除本机副本。未确认数据与近期引用的旧锚点保留，离线时允许暂时超过七天。新库启用增量空页回收；已有累计大库只能通过一次性核验迁移缩小，不能直接删除。
+
+引擎使用 `--disable-snapshot-compaction` 保留原始 JPEG，避免已发现的压缩后尾帧关联缺失；已有 MP4 继续可读。恢复压缩须先独立修复并验证。部署必须同时安装素渊 `deploy/screenpipe-memory/` 下的 `memory_retention.py`、`memory-retention.py`、新版 `memory_incremental.py` 与 `catalog-sync.py`，NAS 安装只读核验 helper；缺少 helper 时归档仍保留数据，清理失败待修，不能回落到旧 media-only 清理。
 
 安装需同时切换素渊 helper、Mac 脚本、NAS 维护代码与 `_service/state/archive-policy.json` 的 `archive_mode=incremental`。永久增量库属于备份原件，不能当普通缓存删除。既有全量历史保留，A/B 继续按 OPC 日程备份 NAS。

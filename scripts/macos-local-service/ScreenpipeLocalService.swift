@@ -30,7 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         "--pause-extraction-on-input-ms", "300",
         "--visual-check-interval-ms", "5000",
         "--disable-telemetry",
-        "--retention-days", "7",
+        "--retention-days", "0",
+        "--disable-snapshot-compaction",
         "--retention-mode", "media",
         "--retention-archive-receipt", NSHomeDirectory() + "/.screenpipe/monitor/nas-archive.json"
     ]
