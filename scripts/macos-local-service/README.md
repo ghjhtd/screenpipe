@@ -35,6 +35,14 @@ swiftc -O scripts/macos-local-service/ScreenpipeLocalService.swift \
 
 `archive_complete_through` 需验证目标记录水位、修改序号与最旧未完成媒体，不把元数据成功等同于媒体全部完成。录制引擎使用 `--retention-days 0`，本机七天记录和媒体由素渊 `memory-retention.py` 在归档成功后统一清理：NAS 永久基线和增量逐批内容核验、媒体 SHA-256 一致后才删除本机副本。未确认数据与近期引用的旧锚点保留，离线时允许暂时超过七天。新库启用增量空页回收；已有累计大库只能通过一次性核验迁移缩小，不能直接删除。
 
-引擎使用 `--disable-snapshot-compaction` 保留原始 JPEG，避免已发现的压缩后尾帧关联缺失；已有 MP4 继续可读。恢复压缩须先独立修复并验证。部署必须同时安装素渊 `deploy/screenpipe-memory/` 下的 `memory_retention.py`、`memory-retention.py`、新版 `memory_incremental.py` 与 `catalog-sync.py`，NAS 安装只读核验 helper；缺少 helper 时归档仍保留数据，清理失败待修，不能回落到旧 media-only 清理。
+引擎使用 `--disable-snapshot-compaction` 保留原始 JPEG，避免已发现的压缩后尾帧关联缺失；已有 MP4 继续可读。恢复压缩须先独立修复并验证。部署必须同时安装素渊 `deploy/screenpipe-memory/` 下的 `memory_retention.py`、`memory-retention.py`、新版 `memory_incremental.py`、`memory_transport.py` 与 `catalog-sync.py`，NAS 安装只读核验 helper；缺少 helper 时归档仍保留数据，清理失败待修，不能回落到旧 media-only 清理。
 
 安装需同时切换素渊 helper、Mac 脚本、NAS 维护代码与 `_service/state/archive-policy.json` 的 `archive_mode=incremental`。永久增量库属于备份原件，不能当普通缓存删除。既有全量历史保留，A/B 继续按 OPC 日程备份 NAS。
+
+## 2026-10-29 回收闭环修复
+
+此处归档入口保持与素渊 `deploy/screenpipe-memory/screenpipe-nas-archive` 的版本化副本一致；回收 helper 的唯一源码在素渊同目录。本轮素渊修复提交为 `a733465`。
+
+回收使用完整待传 ID，先校验并处理过期媒体，再处理记录；新上传失败不再饿死已有 NAS 证明的回收。媒体定位的历史差异仅在有原件证明时兼容，缺证的单独记录保留并重算其余候选。上传、rsync 与核验复用同一个私有 SSH 控制连接，保持已有目标和身份校验。
+
+Mac 需同时安装 `memory_transport.py`；NAS 需先更新 `memory_incremental.py` 和 `memory_retention.py`，再更新本机 helper 和本入口。78 项相关回归、Python 静态检查与 zsh 语法检查通过。完整水位仍受早期缺图约束，不把分批清理成功说成历史原件全部完整。
